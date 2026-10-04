@@ -1008,6 +1008,189 @@ def cmd_reindex(args):
     print(f"[+] 索引重构完成！总目录: {root / 'README.md'}")
 
 
+# ---------------------------------------------------------------- watch (自动巡检与 2 倍速挂机浏览出勤)
+
+async def _play_vod_session(vod_id: str, title: str, speed: float = 2.0, target_seconds: int = None):
+    from playwright.async_api import async_playwright
+
+    cookies_list = []
+    if COOKIE_FILE.exists():
+        for pair in COOKIE_FILE.read_text(encoding="utf-8").split(";"):
+            if "=" in pair:
+                k, v = pair.strip().split("=", 1)
+                cookies_list.append({"name": k, "value": v, "domain": ".learnus.org", "path": "/"})
+                cookies_list.append({"name": k, "value": v, "domain": "ys.learnus.org", "path": "/"})
+
+    url = f"{BASE}/mod/vod/viewer.php?id={vod_id}"
+    print(f"\n   🎬 正在接入视频播放: [{title}] (ID: {vod_id})")
+    print(f"      - 设定倍速: {speed}x | 无头安全环境运行")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--autoplay-policy=no-user-gesture-required"]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+        )
+        await context.add_cookies(cookies_list)
+        page = await context.new_page()
+
+        try:
+            await page.goto(url, wait_until="load", timeout=60000)
+            await page.wait_for_selector("video, iframe", timeout=20000)
+        except Exception as e:
+            print(f"      ! 播放器页面加载超时: {e}")
+            await browser.close()
+            return False
+
+        # 启动视频播放与倍速
+        inject_js = f"""
+        () => {{
+            const v = document.querySelector('video');
+            if (v) {{
+                v.muted = true;
+                v.playbackRate = {speed};
+                v.play().catch(() => {{}});
+                return {{ found: true, duration: v.duration, current: v.currentTime }};
+            }}
+            return {{ found: false }};
+        }}
+        """
+        init_st = await page.evaluate(inject_js)
+        if not init_st or not init_st.get("found"):
+            print("      ! 未能定位到原生 video 元素，可能播放器结构异常")
+            await browser.close()
+            return False
+
+        dur_sec = int(init_st.get("duration") or 0)
+        req_sec = target_seconds if target_seconds else dur_sec
+
+        print(f"      ▶️ 视频总长约 {dur_sec//60}分{dur_sec%60:02d}秒 | 目标达成: {req_sec//60}分{req_sec%60:02d}秒")
+
+        completed = False
+        while True:
+            await asyncio.sleep(10)
+            st = await page.evaluate(f"""
+            () => {{
+                const v = document.querySelector('video');
+                if (v) {{
+                    if (v.paused) v.play().catch(() => {{}});
+                    if (v.playbackRate !== {speed}) v.playbackRate = {speed};
+                    return {{
+                        current: v.currentTime,
+                        duration: v.duration,
+                        ended: v.ended,
+                        paused: v.paused
+                    }};
+                }}
+                return null;
+            }}
+            """)
+            if not st:
+                break
+
+            cur = int(st.get("current") or 0)
+            dur = int(st.get("duration") or dur_sec or 1)
+            pct = int(cur / dur * 100) if dur else 0
+            bar = "█" * (pct // 5) + "░" * (20 - (pct // 5))
+
+            print(f"\r      ⏱️ [{bar}] {pct:3d}% | {cur//60:02d}:{cur%60:02d} / {dur//60:02d}:{dur%60:02d} (速度 {speed}x)", end="", flush=True)
+
+            if st.get("ended") or (req_sec > 0 and cur >= req_sec) or (dur > 0 and cur >= dur - 2):
+                completed = True
+                print(f"\n      ✅ 已达到目标出勤要求！")
+                # 预留最后一次心跳上报缓冲
+                await asyncio.sleep(5)
+                break
+
+        await browser.close()
+        return completed
+
+
+def parse_time_seconds(time_str: str) -> int:
+    """解析 MM:SS 格式为总秒数"""
+    if not time_str or ":" not in time_str:
+        return 0
+    parts = time_str.strip().split(":")
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + int(parts[1])
+    elif len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    return 0
+
+
+def cmd_watch(args):
+    """【自动化网课浏览与出勤】扫描未出勤的视频，按顺序 2 倍速安全挂机达标"""
+    import asyncio
+    s = make_session()
+    courses = list_courses(s, args)
+    speed = float(getattr(args, "speed", 2.0))
+    limit_count = int(getattr(args, "limit", 0))
+
+    print(f"\n=======================================================")
+    print(f" 🚀 正在启动 LearnUs 智能出勤与课程浏览机器人")
+    print(f"    - 播放倍速: {speed}x (合规安全心跳模式)")
+    print(f"    - 扫描目标: {len(courses)} 门课程")
+    print(f"=======================================================\n")
+
+    unwatched_tasks = []
+
+    for cid, title in courses.items():
+        cname = short_course_name(title, cid)
+        sections, acts = parse_course(s, cid)
+        report = attendance_report(s, cid)
+
+        for a in acts:
+            if a["mod"] == "vod" and not STAFF_ONLY.search(a["name"]):
+                req_str, watched_str, att = report.get(a["name"], ("-", "-", "-"))
+                # 如果已经达标标记为 O，直接跳过
+                if att == "O":
+                    continue
+
+                # 检查是否开放
+                if not a.get("open", True):
+                    continue
+
+                req_sec = parse_time_seconds(req_str)
+                unwatched_tasks.append({
+                    "cid": cid,
+                    "course": cname,
+                    "section": a["section"],
+                    "name": a["name"],
+                    "id": a["id"],
+                    "req_sec": req_sec,
+                    "req_str": req_str,
+                    "watched_str": watched_str,
+                    "status": att
+                })
+
+    if not unwatched_tasks:
+        print("🎉 太棒了！您当前所有开放课程的视频出勤全部已达标（100%），无需挂机！\n")
+        return
+
+    print(f"📌 发现以下 {len(unwatched_tasks)} 个待出勤视频任务：")
+    for idx, t in enumerate(unwatched_tasks):
+        print(f"  [{idx+1}] 【{t['course']}】({t['section']}) {t['name']} | 要求: {t['req_str']} (已看: {t['watched_str']})")
+
+    if limit_count > 0:
+        unwatched_tasks = unwatched_tasks[:limit_count]
+
+    print("\n-------------------------------------------------------")
+    print(" 🎬 开始按序自动播放与出勤上报...")
+    print("-------------------------------------------------------")
+
+    for idx, task in enumerate(unwatched_tasks):
+        print(f"\n>> 正在处理 ({idx+1}/{len(unwatched_tasks)}): 【{task['course']}】{task['name']}")
+        asyncio.run(_play_vod_session(task["id"], task["name"], speed=speed, target_seconds=task["req_sec"]))
+        time.sleep(2)
+
+    print("\n=======================================================")
+    print(" 🎉 所有视频挂机任务已处理完毕！正在刷新最新出勤看板...")
+    print("=======================================================\n")
+    cmd_todo(args)
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -1052,6 +1235,13 @@ def main():
     rx = sub.add_parser("reindex", help="扫描已有目录，补全 doc 转 md 并重建知识库 README 索引")
     rx.add_argument("--out", help="工作区根目录 (默认: ./workspace)")
 
+    # 7. watch (自动出勤巡检与 2 倍速网课浏览)
+    w = sub.add_parser("watch", help="【智能出勤】未看视频按顺序 2 倍速安全挂机达标")
+    w.add_argument("--course", help="仅指定课程 (ID 或名称关键字)")
+    w.add_argument("--speed", type=float, default=2.0, help="播放倍速 (默认: 2.0)")
+    w.add_argument("--limit", type=int, default=0, help="本次最多处理几个视频 (0 表示全部)")
+    w.add_argument("--include-noncredit", action="store_true", help="包含比较科非学分培训")
+
     args = p.parse_args()
     cmd_map = {
         "sync": cmd_sync,
@@ -1059,7 +1249,8 @@ def main():
         "cookie": cmd_cookie,
         "todo": cmd_todo,
         "download": cmd_download,
-        "reindex": cmd_reindex
+        "reindex": cmd_reindex,
+        "watch": cmd_watch
     }
     cmd_map[args.cmd](args)
 

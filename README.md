@@ -13,26 +13,27 @@
 
 ## 快速使用
 
-### 方式一：Windows 用户一键启动（最推荐）
+### 方式一：Windows 用户桌面图形客户端（最推荐）
 在 `G:\project\learnus-helper` 目录下，直接双击：
 ```cmd
-sync_workspace.bat
+启动学习助手.bat
 ```
-*(脚本会自动通过 WSL2 调用已配置好的 Python 环境和本地显卡模型，无需在 Windows 宿主机繁琐配置环境)*
+*(现代化深色界面，自带状态指示灯、一键全自动知识库同步、一键 2.0 倍速挂机出勤、查看待办、打开目录)*
 
 ### 方式二：命令行运行
 ```bash
-# 1.【学霸模式全自动同步】(下载课件 + 视频 + doc转md + SenseVoice提取外语讲义 + 生成知识库)
+# 1.【2.0 倍速自动浏览出勤】(自动查找所有未看/未达标视频，安全心跳无头挂机)
+python learnus.py watch --speed 2.0
+
+# 2.【学霸模式全自动同步】(下载课件 + 视频 + doc转md + SenseVoice提取外语讲义 + 生成知识库)
 python learnus.py sync
 
-# 2. 仅同步某一门课 (根据课程名或ID过滤)
-python learnus.py sync --course "컴퓨터네트워크"
+# 3. 仅针对某门课同步或出勤 (例如: 채플 / 소설쓰기)
+python learnus.py watch --course "채플" --speed 2.0
+python learnus.py sync --course "채플"
 
-# 3. 仅下载课件和资料，不下载大型视频
+# 4. 仅下载课件和资料，不下载大型视频
 python learnus.py sync --no-videos
-
-# 4. 首次登录延世门户 SSO 并保存凭据 (免后续重复输入密码)
-python learnus.py login --save
 
 # 5. 查看待办未交作业与未出席视频 (并输出 report.html)
 python learnus.py todo
