@@ -18,9 +18,11 @@ Usage:
 """
 
 import argparse
+import asyncio
 import datetime as dt
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -824,7 +826,7 @@ def cmd_download(args):
                         print(f"   {'+' if new else '='} {path.relative_to(root)}")
                         if getattr(args, "convert_docs", False) and path.suffix.lower() in [".doc", ".docx"]:
                             docx_to_markdown(path) if path.suffix.lower() == ".docx" else doc_to_markdown(path)
-                elif a["mod"] == "vod" and getattr(args, "videos", False) and a["open"] and not STAFF_ONLY.search(a["name"]):
+                elif a["mod"] == "vod" and getattr(args, "videos", False) and not STAFF_ONLY.search(a["name"]):
                     dest = wdir / f"{safe_name(a['name'])}.mp4"
                     print(f"   ~ video {dest.relative_to(root)}")
                     new_vod = download_video(s, a["id"], dest)
@@ -924,7 +926,7 @@ def cmd_sync(args):
                             if md_f:
                                 print(f"      📄 已转换为 Markdown: {md_f.name}")
 
-                elif a["mod"] == "vod" and download_videos and a["open"] and not STAFF_ONLY.search(a["name"]):
+                elif a["mod"] == "vod" and download_videos and not STAFF_ONLY.search(a["name"]):
                     dest = wdir / f"{safe_name(a['name'])}.mp4"
                     new_vod = download_video(s, a["id"], dest)
                     if new_vod:
@@ -1063,8 +1065,15 @@ async def _play_vod_session(vod_id: str, title: str, speed: float = 2.0, target_
             await browser.close()
             return False
 
-        dur_sec = int(init_st.get("duration") or 0)
-        req_sec = target_seconds if target_seconds else dur_sec
+        raw_dur = init_st.get("duration")
+        dur_sec = int(raw_dur) if (raw_dur is not None and not (isinstance(raw_dur, float) and math.isnan(raw_dur))) else 0
+        # 出勤保护：为防止最后一次心跳时间戳导致服务器少计几秒，要求时长增加 60 秒安全缓冲（不超过视频总时长）
+        if target_seconds:
+            req_sec = target_seconds + 60
+            if dur_sec > 0 and req_sec > dur_sec:
+                req_sec = dur_sec
+        else:
+            req_sec = dur_sec
 
         print(f"      ▶️ 视频总长约 {dur_sec//60}分{dur_sec%60:02d}秒 | 目标达成: {req_sec//60}分{req_sec%60:02d}秒")
 
@@ -1090,8 +1099,13 @@ async def _play_vod_session(vod_id: str, title: str, speed: float = 2.0, target_
             if not st:
                 break
 
-            cur = int(st.get("current") or 0)
-            dur = int(st.get("duration") or dur_sec or 1)
+            cur_raw = st.get("current")
+            cur = int(cur_raw) if (cur_raw is not None and not (isinstance(cur_raw, float) and math.isnan(cur_raw))) else 0
+            d_raw = st.get("duration")
+            if d_raw is not None and not (isinstance(d_raw, float) and math.isnan(d_raw)) and int(d_raw) > 0:
+                dur = int(d_raw)
+            else:
+                dur = dur_sec or req_sec or 1
             pct = int(cur / dur * 100) if dur else 0
             bar = "█" * (pct // 5) + "░" * (20 - (pct // 5))
 
@@ -1100,8 +1114,9 @@ async def _play_vod_session(vod_id: str, title: str, speed: float = 2.0, target_
             if st.get("ended") or (req_sec > 0 and cur >= req_sec) or (dur > 0 and cur >= dur - 2):
                 completed = True
                 print(f"\n      ✅ 已达到目标出勤要求！")
-                # 预留最后一次心跳上报缓冲
-                await asyncio.sleep(5)
+                # 触发暂停促使 learningChecker 立即刷出最后一段出勤心跳包
+                await page.evaluate("() => { const v = document.querySelector('video'); if (v) v.pause(); }")
+                await asyncio.sleep(8)
                 break
 
         await browser.close()
