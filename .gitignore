@@ -1,0 +1,13 @@
+# login secrets
+cookies.txt
+credentials.json
+
+# generated output
+downloads/
+report.html
+*.part
+*.part.mp4
+
+__pycache__/
+*.pyc
+.venv/
