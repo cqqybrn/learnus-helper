@@ -764,7 +764,7 @@ def build_course_readme(course_dir: Path, cname: str, cid: str, sections: list, 
         sec_dir = course_dir / folder
         if not sec_dir.exists():
             continue
-        mat_count = len([f for f in sec_dir.iterdir() if f.is_file() and not f.name.endswith(".mp4") and not f.name.endswith(".transcript.md") and f.name != "README.md"])
+        mat_count = len([f for f in sec_dir.iterdir() if f.is_file() and not f.name.endswith(".mp4") and not f.name.endswith(".transcript.md") and not f.name.endswith(".raw.srt") and not f.name.endswith(".raw.txt") and f.name != "README.md"])
         vod_count = len(list(sec_dir.glob("*.mp4")))
         lines.append(f"| **{folder}** | {sec_name} | {mat_count} | {vod_count} | [进入单元学习]({folder}/README.md) |")
 
@@ -783,7 +783,7 @@ def build_workspace_readme(root: Path, course_summaries: list, all_pending: list
         "> 本知识库由 `learnus-helper` 自动构建与同步。专为 AI Agent Harness（Claude Code, Cursor 等）打造。\n",
         "## 🤖 AI Harness / Agent 使用指引",
         "1. **结构说明**：每个课程目录代表一门学科，子目录对应各个单元/周次（`01주차`, `02주차` 等）。",
-        "2. **Markdown 课件优先阅读**：所有原始 `.docx` / `.doc` 课件已被自动转换为排版结构化的 `.md` 文件，包含标题层级与表格，请优先阅读对应 `.md`。",
+        "2. **Markdown 课件优先阅读**：所有原始 `.pdf` / `.pptx` / `.docx` / `.doc` 课件已被自动转换为排版结构化的 `.md` 文件，包含标题层级与表格，请优先阅读对应 `.md`。",
         "3. **课堂发言实录**：所有课程视频已由阿里 SenseVoice 本地 GPU 模型提取为纯外语原文讲义（`*.transcript.md`），包含精确时间点标记。",
         "4. **复习与辅导**：可直接检索各个单元的 `README.md` 获取该周的大纲、课件与视频讲义，进行针对性复习、知识点问答或考前划重点。\n",
         "## 📖 本学期在修课程清单",
@@ -1066,6 +1066,10 @@ def cmd_sync(args):
             if sec_dir.exists():
                 sec_assigns = [x for x in course_assignments if x["section"] == folder]
                 build_unit_readme(sec_dir, f"{cname} - {sec_name}", assignments=sec_assigns)
+        # 兼容处理未在 sections 中列出的附加单元目录（如资料室未标明周次的文件夹）
+        for extra_dir in course_dir.iterdir():
+            if extra_dir.is_dir() and not any(extra_dir.name == s[0] for s in sections):
+                build_unit_readme(extra_dir, f"{cname} - {extra_dir.name}")
 
         # 构建课程级 README.md
         build_course_readme(course_dir, cname, cid, sections, assignments=course_assignments)
