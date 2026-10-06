@@ -137,29 +137,48 @@ def sso_login(uid, pw):
     r = s.get(BASE + "/passni/sso/spLogin2.php", timeout=30, headers={"Referer": BASE + "/login.php"})
     r = follow_auto_forms(s, r)
 
+    # 支持新版/老版 SSO 表单结构
+    m_chal = re.search(r"var\s+ssoChallenge\s*=\s*'([^']+)'", r.text)
+    m_rsa = re.search(r"rsa\.setPublic\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", r.text)
     soup = BeautifulSoup(r.text, "html.parser")
-    form = soup.select_one("form#loginFrm") or soup.select_one("form[name='loginFrm']")
+    form = soup.select_one("form#ssoLoginForm") or soup.select_one("form#loginFrm") or soup.select_one("form[name='loginFrm']")
     if not form:
         raise RuntimeError("could not find portal login form")
     action = urljoin(r.url, form.get("action", ""))
 
-    keys = s.get("https://infra.yonsei.ac.kr/sso/getE2EKey.do", timeout=30).json()
-    enc_id = rsa_encrypt_hex(uid, keys["publicKeyModulus"], keys["publicKeyExponent"])
-    enc_pw = rsa_encrypt_hex(pw, keys["publicKeyModulus"], keys["publicKeyExponent"])
+    if m_chal and m_rsa:
+        sso_challenge = m_chal.group(1)
+        modulus, exponent = m_rsa.group(1), m_rsa.group(2)
+        payload = {"userid": uid, "userpw": pw, "ssoChallenge": sso_challenge}
+        json_str = json.dumps(payload, separators=(',', ':'))
+        enc_e2 = rsa_encrypt_hex(json_str, modulus, exponent)
 
-    data = {
-        "loginType": "sso",
-        "returnUrl": (form.select_one("input[name='returnUrl']") or {}).get("value", ""),
-        "challenge": (form.select_one("input[name='challenge']") or {}).get("value", ""),
-        "response": (form.select_one("input[name='response']") or {}).get("value", ""),
-        "tId": (form.select_one("input[name='tId']") or {}).get("value", ""),
-        "e2e_id": enc_id,
-        "e2e_pw": enc_pw,
-        "userId": "",
-        "userPassword": "",
-    }
+        data = {inp.get("name"): inp.get("value", "") for inp in form.find_all("input") if inp.get("name")}
+        data["E2"] = enc_e2
+        data["loginId"] = ""
+        data["loginPasswd"] = ""
+    else:
+        keys = s.get("https://infra.yonsei.ac.kr/sso/getE2EKey.do", timeout=30).json()
+        enc_id = rsa_encrypt_hex(uid, keys["publicKeyModulus"], keys["publicKeyExponent"])
+        enc_pw = rsa_encrypt_hex(pw, keys["publicKeyModulus"], keys["publicKeyExponent"])
+        data = {
+            "loginType": "sso",
+            "returnUrl": (form.select_one("input[name='returnUrl']") or {}).get("value", ""),
+            "challenge": (form.select_one("input[name='challenge']") or {}).get("value", ""),
+            "response": (form.select_one("input[name='response']") or {}).get("value", ""),
+            "tId": (form.select_one("input[name='tId']") or {}).get("value", ""),
+            "e2e_id": enc_id,
+            "e2e_pw": enc_pw,
+            "userId": "",
+            "userPassword": "",
+        }
+
     r = s.post(action, data=data, timeout=30, headers={"Referer": r.url})
     r = follow_auto_forms(s, r)
+    if "spLoginData.php" in r.url:
+        r = s.get(BASE + "/passni/spLoginProcess.php", timeout=30, headers={"Referer": r.url})
+        r = follow_auto_forms(s, r)
+
     if "비밀번호" in r.text and ("오류" in r.text or "불일치" in r.text):
         raise RuntimeError("SSO 认证失败：学号或密码错误")
     if not logged_in(s):
@@ -530,15 +549,94 @@ def doc_to_markdown(doc_path: Path) -> Path:
         return None
 
 
+def convert_doc_file(path: Path) -> Path:
+    """自动将 docx, doc, pptx, pdf 转换为清晰易读的 Markdown"""
+    suffix = path.suffix.lower()
+    if suffix == ".docx":
+        return docx_to_markdown(path)
+    elif suffix == ".doc":
+        return doc_to_markdown(path)
+    elif suffix == ".pptx":
+        return pptx_to_markdown(path)
+    elif suffix == ".pdf":
+        return pdf_to_markdown(path)
+    return None
+
+
+def pptx_to_markdown(pptx_path: Path) -> Path:
+    """提取 PPTX 课件幻灯片内容并转换为 Markdown"""
+    md_path = pptx_path.with_suffix(".md")
+    if md_path.exists() and md_path.stat().st_mtime >= pptx_path.stat().st_mtime:
+        return md_path
+    try:
+        from pptx import Presentation
+        prs = Presentation(pptx_path)
+    except Exception as e:
+        print(f"      ! pptx 解析失败 {pptx_path.name}: {e}")
+        return None
+
+    lines = [
+        f"# {pptx_path.stem}\n",
+        f"> *[自动化提取幻灯片课件] 原始文件: `{pptx_path.name}`*\n"
+    ]
+    for idx, slide in enumerate(prs.slides, start=1):
+        slide_lines = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for paragraph in shape.text_frame.paragraphs:
+                    t = paragraph.text.strip()
+                    if t:
+                        slide_lines.append(f"- {t}")
+            elif shape.has_table:
+                table = shape.table
+                rows = list(table.rows)
+                if len(rows) > 0:
+                    slide_lines.append("\n| " + " | ".join(clean(c.text).replace("|", "\\|") for c in rows[0].cells) + " |")
+                    slide_lines.append("| " + " | ".join("---" for _ in rows[0].cells) + " |")
+                    for row in rows[1:]:
+                        slide_lines.append("| " + " | ".join(clean(c.text).replace("|", "\\|") for c in row.cells) + " |")
+        if slide_lines:
+            lines.append(f"\n## Slide {idx}\n")
+            lines.extend(slide_lines)
+
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return md_path
+
+
+def pdf_to_markdown(pdf_path: Path) -> Path:
+    """提取 PDF 课件文档内容并转换为 Markdown"""
+    md_path = pdf_path.with_suffix(".md")
+    if md_path.exists() and md_path.stat().st_mtime >= pdf_path.stat().st_mtime:
+        return md_path
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(str(pdf_path))
+    except Exception as e:
+        print(f"      ! pdf 解析失败 {pdf_path.name}: {e}")
+        return None
+
+    lines = [
+        f"# {pdf_path.stem}\n",
+        f"> *[自动化提取课件文档] 原始文件: `{pdf_path.name}`*\n"
+    ]
+    for idx, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        text = text.strip()
+        if text:
+            lines.append(f"\n## 第 {idx} 页\n")
+            lines.append(text + "\n")
+
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return md_path
+
+
 def convert_all_docs_in_dir(target_dir: Path):
-    """递归将目录中的所有 doc/docx 转换为 md"""
+    """递归将目录中的所有 doc/docx/pptx/pdf 转换为 md"""
     converted = 0
-    for docx_file in target_dir.rglob("*.docx"):
-        if docx_to_markdown(docx_file):
-            converted += 1
-    for doc_file in target_dir.rglob("*.doc"):
-        if doc_to_markdown(doc_file):
-            converted += 1
+    for ext in ("*.docx", "*.doc", "*.pptx", "*.pdf"):
+        for doc_file in target_dir.rglob(ext):
+            if convert_doc_file(doc_file):
+                converted += 1
     return converted
 
 
@@ -606,16 +704,16 @@ def build_unit_readme(unit_dir: Path, unit_name: str, activities: list = None, a
     materials = [f for f in unit_dir.iterdir() if f.is_file() and not f.name.endswith(".mp4") and not f.name.endswith(".transcript.md") and not f.name.endswith(".raw.srt") and not f.name.endswith(".raw.txt") and f.name != "README.md"]
     if materials:
         for m in sorted(materials, key=lambda x: x.name):
-            if m.suffix.lower() in [".doc", ".docx"]:
+            if m.suffix.lower() in [".doc", ".docx", ".pdf", ".pptx"]:
                 md_ver = m.with_suffix(".md")
                 if md_ver.exists():
-                    lines.append(f"- 📄 **{m.stem}**: [阅读 Markdown 格式]({md_ver.name}) *(原始文档: [{m.name}]({m.name}))*")
+                    lines.append(f"- 📄 **{m.stem}**: [阅读 Markdown 格式]({md_ver.name}) *(原始文件: [{m.name}]({m.name}))*")
                 else:
                     lines.append(f"- 📄 [{m.name}]({m.name})")
             elif m.suffix.lower() == ".md":
-                orig_docx = m.with_suffix(".docx")
-                orig_doc = m.with_suffix(".doc")
-                if not orig_docx.exists() and not orig_doc.exists():
+                # 若对应原始课件文件已存在，则上文已一并索引，此处跳过避免重复
+                orig_exists = any(m.with_suffix(s).exists() for s in [".docx", ".doc", ".pdf", ".pptx"])
+                if not orig_exists:
                     lines.append(f"- 📝 [{m.name}]({m.name})")
             else:
                 lines.append(f"- 📑 [{m.name}]({m.name})")
@@ -921,10 +1019,12 @@ def cmd_sync(args):
                         path, new = fetch_file(s, url, target)
                         status_sym = "+" if new else "="
                         print(f"   {status_sym} 课件: {path.name}")
-                        if path.suffix.lower() in [".doc", ".docx"]:
-                            md_f = docx_to_markdown(path) if path.suffix.lower() == ".docx" else doc_to_markdown(path)
+                        if path.suffix.lower() in [".doc", ".docx", ".pptx", ".pdf"]:
+                            md_f = convert_doc_file(path)
                             if md_f:
                                 print(f"      📄 已转换为 Markdown: {md_f.name}")
+                        elif path.suffix.lower() == ".mp4" and download_videos:
+                            transcribe_video_raw(path, lang=lang)
 
                 elif a["mod"] == "vod" and download_videos and not STAFF_ONLY.search(a["name"]):
                     dest = wdir / f"{safe_name(a['name'])}.mp4"
@@ -949,10 +1049,12 @@ def cmd_sync(args):
                             path, new = fetch_file(s, url, target)
                             status_sym = "+" if new else "="
                             print(f"   {status_sym} 资料室附件: {path.name}")
-                            if path.suffix.lower() in [".doc", ".docx"]:
-                                md_f = docx_to_markdown(path) if path.suffix.lower() == ".docx" else doc_to_markdown(path)
+                            if path.suffix.lower() in [".doc", ".docx", ".pptx", ".pdf"]:
+                                md_f = convert_doc_file(path)
                                 if md_f:
                                     print(f"      📄 已转换为 Markdown: {md_f.name}")
+                            elif path.suffix.lower() == ".mp4" and download_videos:
+                                transcribe_video_raw(path, lang=lang)
                         time.sleep(0.3)
             except Exception as ex:
                 print(f"   ! {a['mod']} {a['name']}: {ex}")
