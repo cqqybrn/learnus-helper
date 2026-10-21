@@ -12,6 +12,12 @@ __pycache__/
 *.pyc
 .venv/
 
+# korea / ewha secrets & workspace
+korea/ewha/.ewha.cookies
+korea/ewha/.ewha.mfa-pending.json
+korea/ewha/.kmooc.storage.json
+korea/ewha/workspace/
+
 # korea / local runs
 korea/**/*.log
 _learnus_*

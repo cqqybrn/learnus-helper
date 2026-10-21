@@ -1,0 +1,8 @@
+.ewha.cookies
+.ewha.mfa-pending.json
+.kmooc.storage.json
+workspace/
+report.html
+__pycache__/
+*.pyc
+kmooc/*.log

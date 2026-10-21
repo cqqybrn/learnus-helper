@@ -57,7 +57,7 @@ python learnus.py reindex
 见 [`korea/README.md`](korea/README.md)：
 
 - **延世**：`korea/yonsei/vod_log_heartbeat_paced.py`（`vod_log`）
-- **梨花 K-MOOC**：`korea/ewha/kmooc/kmooc_heartbeat_all.py`（`trackDetail`）
+- **梨花全栈**：`korea/ewha/ewha.py`（Cyber 登录/MFA/todo/sync/watch）、`kmooc.py`、[`korea/ewha/kmooc/`](korea/ewha/kmooc/) 轻量心跳
 
 ---
 

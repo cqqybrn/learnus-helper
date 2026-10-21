@@ -5,7 +5,7 @@
 | 学校 | 平台 | 目录 | 上报方式 |
 |------|------|------|----------|
 | 延世 | LearnUs `ys.learnus.org` | [yonsei/](yonsei/) | `type=vod_log` |
-| 梨花 · K-MOOC 学分课 | `lms.kmooc.kr` | [ewha/kmooc/](ewha/kmooc/) | `coursemostype=trackDetail` |
+| 梨花 | Cyber + K-MOOC | [ewha/](ewha/)（`ewha.py` 登录/todo/sync + [ewha/kmooc/](ewha/kmooc/) 轻量心跳） | `trackDetail` / `vod_log` |
 
 根目录 `learnus.py` 仍为延世 **2x 无头真播** 主入口；轻量模式见上表各 README。
 

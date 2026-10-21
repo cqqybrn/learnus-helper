@@ -2,4 +2,6 @@ requests>=2.28
 beautifulsoup4>=4.11
 websocket-client>=1.5
 python-docx>=1.1.0
+python-pptx>=0.6.21
+pypdf>=3.0
 playwright>=1.40
