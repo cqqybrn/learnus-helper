@@ -11,3 +11,17 @@ report.html
 __pycache__/
 *.pyc
 .venv/
+
+# korea / local runs
+korea/**/*.log
+_learnus_*
+_learningChecker.js
+_fetch_*.py
+*.html
+!report.html
+
+# scratch at repo root (keep out of git)
+/_*.py
+/_*.txt
+/_*.js
+/_*.html

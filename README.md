@@ -1,6 +1,6 @@
-# learnus-helper (LearnUs 智能助学知识库助手)
+# learnus-helper · 韩国大学 LMS 助手
 
-延世大学 LearnUs (ys.learnus.org) 自动化学习辅助与知识库构建系统。
+以 **延世 LearnUs** 为主入口，并逐步在 [`korea/`](korea/) 聚合各校 **Coursemos / Moodle** 工具（梨花 K-MOOC、轻量 VOD 心跳刷课等）。
 
 **像一个管理的井井有条的学霸一样**：
 1. 自动登录延世门户，列出未交作业与待办事项。
@@ -51,6 +51,13 @@ python learnus.py todo
 # 6. 对已有下载文件夹重新跑文档格式转换与知识库索引构建
 python learnus.py reindex
 ```
+
+### 轻量 VOD 刷课（逆向心跳，低内存）
+
+见 [`korea/README.md`](korea/README.md)：
+
+- **延世**：`korea/yonsei/vod_log_heartbeat_paced.py`（`vod_log`）
+- **梨花 K-MOOC**：`korea/ewha/kmooc/kmooc_heartbeat_all.py`（`trackDetail`）
 
 ---
 
