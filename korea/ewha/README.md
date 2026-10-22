@@ -91,4 +91,4 @@ korea/ewha/
 ## 说明
 
 - **Cyber Online-Attendance 空表** 的壳课不会写入 K-MOOC 视频进度；学分以 K-MOOC + 이수증为准。
-- 轻量刷课墙钟时间约等于剩余片长；_sesskey 长跑见 `kmooc_heartbeat_all.py` 自动刷新。
+- 轻量刷课墙钟时间约等于剩余片长；针对长任务的 Session 过期（302 重定向）、`sesskey` 轮换（code 399）及无头时长探测偏差已在 `kmooc/` 实现全自动重试与鉴权加固，详见 [kmooc/README.md](kmooc/README.md)。
