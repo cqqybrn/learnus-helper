@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run paced trackDetail for every pending VOD in KMOOC_COURSE (no video decode)."""
 import asyncio
+import json
 import os
 import re
 import sys
@@ -10,10 +11,31 @@ from datetime import datetime
 import requests
 
 LMS = "https://lms.kmooc.kr"
-COURSE = os.environ.get("KMOOC_COURSE", "20515")
-INTERVAL = float(os.environ.get("KMOOC_INTERVAL", "63"))
-STEP = float(os.environ.get("KMOOC_STEP", "60"))
-LOG_PATH = os.environ.get(
+
+
+def get_config(key, default=""):
+    val = os.environ.get(key)
+    if val:
+        return val
+    for p in [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "credentials.json"),
+    ]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    if key in cfg and cfg[key]:
+                        return cfg[key]
+            except Exception:
+                pass
+    return default
+
+
+COURSE = get_config("KMOOC_COURSE", "20515")
+INTERVAL = float(get_config("KMOOC_INTERVAL", "63"))
+STEP = float(get_config("KMOOC_STEP", "60"))
+LOG_PATH = get_config(
     "KMOOC_PACED_LOG",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "kmooc_paced_all.log"),
 )
@@ -27,6 +49,7 @@ def log(msg):
 
 
 async def login(browser, page, uid, pw):
+    log("Logging in to K-MOOC...")
     page.on("dialog", lambda d: asyncio.ensure_future(d.accept()))
     await page.goto("https://www.kmooc.kr/login", wait_until="networkidle", timeout=60000)
     await page.fill("#userid", uid)
@@ -50,11 +73,26 @@ async def pending_vods(page):
             const pct = cells.find(c => /^\\d{1,3}(\\.\\d+)?%$/.test(c));
             const val = pct ? parseFloat(pct) : 0;
             if (val >= 99.99) return;
+            
+            let reqSec = 0;
+            for (const c of cells) {
+                const m = c.match(/^(\\d+):(\\d+)(?::(\\d+))?$/);
+                if (m) {
+                    if (m[3]) {
+                        reqSec = parseInt(m[1], 10)*3600 + parseInt(m[2], 10)*60 + parseInt(m[3], 10);
+                    } else {
+                        reqSec = parseInt(m[1], 10)*60 + parseInt(m[2], 10);
+                    }
+                    break;
+                }
+            }
+
             out.push({
                 title: link.innerText.trim(),
                 id: (link.href.match(/id=(\\d+)/)||[])[1],
                 pct: pct || "0%",
                 val,
+                reqSec,
             });
         });
         return out;
@@ -62,8 +100,8 @@ async def pending_vods(page):
     )
 
 
-async def video_duration(page):
-    for _ in range(40):
+async def video_duration(page, fallback_sec=0):
+    for _ in range(15):
         dur = await page.evaluate(
             """async () => {
             function pick() {
@@ -84,7 +122,10 @@ async def video_duration(page):
         if dur and dur > 30:
             return float(dur)
         await page.wait_for_timeout(1000)
-    return float(os.environ.get("KMOOC_DUR_FALLBACK", "1327"))
+    if fallback_sec and fallback_sec > 30:
+        log(f"  using table duration fallback: {fallback_sec}s")
+        return float(fallback_sec)
+    return float(get_config("KMOOC_DUR_FALLBACK", "1327"))
 
 
 def parse_viewer(html):
@@ -93,7 +134,10 @@ def parse_viewer(html):
         raise RuntimeError("no amd.progress")
     parts = re.findall(r'"(.*?)"|(-?\d+(?:\.\d+)?)|(true|false|null)', m.group(1))
     args = [a or b or c for a, b, c in parts]
-    return args[5], args[6], args[2], re.search(r'"sesskey":"([^"]+)"', html).group(1)
+    sess_m = re.search(r'"sesskey":"([^"]+)"', html)
+    if not sess_m:
+        raise RuntimeError("no sesskey in viewer html")
+    return args[5], args[6], args[2], sess_m.group(1)
 
 
 def session_from_cookies(cookies):
@@ -124,17 +168,24 @@ def track(s, courseid, cmid, sesskey, attempt, state, start, end):
     return r.json()
 
 
-async def refresh_track_session(page, context, s, vod_id):
-    await page.goto(f"{LMS}/mod/vod/viewer.php?id={vod_id}", wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(1000)
-    html = await page.content()
-    courseid, cmid, attempt, sesskey = parse_viewer(html)
-    for c in await context.cookies():
-        s.cookies.set(c["name"], c["value"], domain=c.get("domain"), path=c.get("path") or "/")
-    return courseid, cmid, attempt, sesskey
+async def refresh_track_session(page, context, s, vod_id, uid, pw):
+    for retry in range(3):
+        try:
+            await page.goto(f"{LMS}/mod/vod/viewer.php?id={vod_id}", wait_until="networkidle", timeout=90000)
+            await page.wait_for_timeout(1000)
+            html = await page.content()
+            courseid, cmid, attempt, sesskey = parse_viewer(html)
+            for c in await context.cookies():
+                s.cookies.set(c["name"], c["value"], domain=c.get("domain"), path=c.get("path") or "/")
+            return courseid, cmid, attempt, sesskey
+        except Exception as e:
+            log(f"  refresh_track_session retry {retry+1}/3 failed ({e}), re-logging in...")
+            await login(page.context.browser, page, uid, pw)
+            await page.wait_for_timeout(2000)
+    raise RuntimeError("Failed to refresh track session after 3 retries")
 
 
-async def paced_requests(page, context, s, vod_id, courseid, cmid, sesskey, attempt, dur, start_pct):
+async def paced_requests(page, context, s, vod_id, courseid, cmid, sesskey, attempt, dur, start_pct, uid, pw):
     start = dur * start_pct / 100.0
     log(f"  paced start={start:.0f}s dur={dur:.0f}s steps~={int((dur-start)/STEP)+1}")
     track(s, courseid, cmid, sesskey, attempt, "3", start, start)
@@ -143,12 +194,13 @@ async def paced_requests(page, context, s, vod_id, courseid, cmid, sesskey, atte
     while cur < dur - 0.5:
         await asyncio.sleep(INTERVAL)
         if beat and beat % 4 == 0:
-            courseid, cmid, attempt, sesskey = await refresh_track_session(page, context, s, vod_id)
+            courseid, cmid, attempt, sesskey = await refresh_track_session(page, context, s, vod_id, uid, pw)
             log("  refreshed sesskey/cookies")
         nxt = min(dur, cur + STEP)
         data = track(s, courseid, cmid, sesskey, attempt, "8", cur, nxt)
         if data.get("code") == "399":
-            courseid, cmid, attempt, sesskey = await refresh_track_session(page, context, s, vod_id)
+            log("  sesskey expired (code 399), refreshing...")
+            courseid, cmid, attempt, sesskey = await refresh_track_session(page, context, s, vod_id, uid, pw)
             data = track(s, courseid, cmid, sesskey, attempt, "8", cur, nxt)
         if data.get("code") != "100":
             log(f"  ! track error: {data}")
@@ -158,19 +210,21 @@ async def paced_requests(page, context, s, vod_id, courseid, cmid, sesskey, atte
     log("  paced ended state=10")
 
 
-async def process_one(page, context, item):
+async def process_one(page, context, item, uid, pw):
     vod_id = item["id"]
     title = item["title"]
     pct = float(item["val"])
+    req_sec = item.get("reqSec", 0)
     log(f">> {title} id={vod_id} report={pct}%")
-    await page.goto(f"{LMS}/mod/vod/viewer.php?id={vod_id}", wait_until="domcontentloaded", timeout=90000)
-    await page.wait_for_timeout(2000)
-    dur = await video_duration(page)
-    html = await page.content()
-    courseid, cmid, attempt, sesskey = parse_viewer(html)
+    
+    # open viewer with retry
+    courseid, cmid, attempt, sesskey = await refresh_track_session(page, context, requests.Session(), vod_id, uid, pw)
+    dur = await video_duration(page, fallback_sec=req_sec)
+    
     cookies = await context.cookies()
     s = session_from_cookies(cookies)
-    await paced_requests(page, context, s, vod_id, courseid, cmid, sesskey, attempt, dur, pct)
+    await paced_requests(page, context, s, vod_id, courseid, cmid, sesskey, attempt, dur, pct, uid, pw)
+    
     await page.goto(f"{LMS}/local/ubonattend/report.php?id={COURSE}", wait_until="networkidle", timeout=90000)
     new_pct = await page.evaluate(
         """(vod) => {
@@ -193,14 +247,15 @@ async def process_one(page, context, item):
 
 
 async def main():
-    uid = os.environ.get("KMOOC_ID", "ying11@ewha.ac.kr")
-    pw = os.environ.get("KMOOC_PW")
-    if not pw:
-        log("KMOOC_PW not set")
+    uid = get_config("KMOOC_ID")
+    pw = get_config("KMOOC_PW")
+    if not uid or not pw:
+        log("Error: KMOOC_ID / KMOOC_PW not found in environment or credentials.json")
         sys.exit(1)
+
     from playwright.async_api import async_playwright
 
-    log(f"course={COURSE} interval={INTERVAL}s step={STEP}s")
+    log(f"course={COURSE} interval={INTERVAL}s step={STEP}s user={uid}")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--disable-gpu", "--mute-audio"])
         context = await browser.new_context()
@@ -212,7 +267,7 @@ async def main():
                 log("all pending cleared")
                 break
             log(f"pending count={len(items)}")
-            ok = await process_one(page, context, items[0])
+            ok = await process_one(page, context, items[0], uid, pw)
             if not ok:
                 log("  ! still <100%, will retry same vod on next round")
         await browser.close()

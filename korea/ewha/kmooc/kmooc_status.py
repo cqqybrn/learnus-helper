@@ -1,12 +1,36 @@
 import asyncio
+import json
 import os
+import sys
+
+def get_config(key, default=""):
+    val = os.environ.get(key)
+    if val:
+        return val
+    for p in [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "credentials.json"),
+    ]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    if key in cfg and cfg[key]:
+                        return cfg[key]
+            except Exception:
+                pass
+    return default
 
 async def main():
     from playwright.async_api import async_playwright
 
-    pw = os.environ["KMOOC_PW"]
-    uid = os.environ.get("KMOOC_ID", "ying11@ewha.ac.kr")
-    cid = os.environ.get("KMOOC_COURSE", "20514")
+    uid = get_config("KMOOC_ID")
+    pw = get_config("KMOOC_PW")
+    cid = get_config("KMOOC_COURSE", "20515")
+    if not uid or not pw:
+        print("Error: KMOOC_ID / KMOOC_PW not set in environment or credentials.json")
+        sys.exit(1)
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await (await browser.new_context()).new_page()
@@ -44,4 +68,5 @@ async def main():
         await browser.close()
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
